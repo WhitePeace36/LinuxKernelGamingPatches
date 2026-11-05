@@ -1,0 +1,116 @@
+From bde2e4f823fec3097517b557f10fe868629ec7a8 Mon Sep 17 00:00:00 2001
+From: "Claude (draft)" <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 19:01:36 +0100
+Subject: [PATCH] mm/page_alloc: add soft defrag_mode (vm.defrag_mode=2)
+
+defrag_mode=1 makes kswapd and kcompactd keep the watermarks met in
+whole free pageblocks, which gives a reserve of blocks for THP and
+other pageblock-order users. It also forbids migratetype fallbacks in
+the allocator until direct reclaim and compaction have failed. For
+unmovable requests the reclaim/compaction order is promoted to
+pageblock_order, and should_reclaim_retry() lets promoted requests loop
+up to MAX_RECLAIM_RETRIES times. An order-0 slab or page table
+allocation can therefore run several rounds of direct reclaim and
+pageblock-order compaction while plenty of memory is free, which shows
+up as more allocstall/compact_stall events than with defrag_mode=0.
+
+Add a soft mode. With vm.defrag_mode=2 the background behaviour is
+identical to mode 1: kswapd is woken at pageblock order, balances on
+NR_FREE_PAGES_BLOCKS, and kcompactd targets the high watermark in whole
+blocks. In the allocator, ALLOC_NOFRAGMENT still applies to the fast
+path and the first slow path attempt (after kswapd has been woken), but
+if that fails the fallback is allowed immediately instead of entering
+reclaim/compaction for it. Direct reclaim and compaction then only run
+when memory is actually short, as in mode 0.
+
+Fallbacks taken in soft mode can be observed with the
+mm_page_alloc_extfrag tracepoint.
+
+DRAFT, untested at runtime; compile-tested only (x86_64 defconfig + THP).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jpc2uj1P9if4WYVKq5YGZK
+---
+ Documentation/admin-guide/sysctl/vm.rst | 12 ++++++++++++
+ mm/internal.h                           |  5 +++++
+ mm/page_alloc.c                         | 18 +++++++++++++++++-
+ 3 files changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/admin-guide/sysctl/vm.rst b/Documentation/admin-guide/sysctl/vm.rst
+index 3cb0138e8..a17e70f74 100644
+--- a/Documentation/admin-guide/sysctl/vm.rst
++++ b/Documentation/admin-guide/sysctl/vm.rst
+@@ -156,6 +156,18 @@ defrag_mode
+ 
+ When set to 1, the page allocator tries harder to avoid fragmentation
+ and maintain the ability to produce huge pages / higher-order pages.
++kswapd and kcompactd keep the watermarks met in whole free pageblocks,
++and allocations that would have to fall back to a pageblock of another
++migratetype first perform direct reclaim and compaction to avoid that.
++This can increase allocation stalls (allocstall, compact_stall),
++especially for unmovable kernel allocations.
++
++When set to 2 ("soft" mode), kswapd and kcompactd behave as with 1, but
++an allocation that cannot be served without a fallback is allowed to
++fall back as soon as kswapd has been woken, instead of reclaiming or
++compacting for it. Direct reclaim and compaction then only happen when
++memory is actually short, as with 0. This keeps a reserve of free
++pageblocks for huge pages without adding foreground stalls.
+ 
+ It is recommended to enable this right after boot, as fragmentation,
+ once it occurred, can be long-lasting or even permanent.
+diff --git a/mm/internal.h b/mm/internal.h
+index 95b1c2756..a1b6af0da 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -742,6 +742,11 @@ extern char * const zone_names[MAX_NR_ZONES];
+ extern int min_free_kbytes;
+ extern int defrag_mode;
+ 
++/* vm.defrag_mode values */
++#define DEFRAG_MODE_OFF		0
++#define DEFRAG_MODE_STRICT	1	/* foreground reclaim/compaction before fallback */
++#define DEFRAG_MODE_SOFT	2	/* background targets only, never stall for it */
++
+ void setup_per_zone_wmarks(void);
+ void calculate_min_free_kbytes(void);
+ int __meminit init_per_zone_wmark_min(void);
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 3aea974df..474e02e86 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -4872,6 +4872,22 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
+ 	if (page)
+ 		goto got_pg;
+ 
++	/*
++	 * Soft defrag_mode: kswapd has just been woken at pageblock order
++	 * (wake_all_kswapds()) and works with kcompactd towards whole free
++	 * pageblocks at the high watermark. Don't make this task reclaim or
++	 * compact merely to avoid a migratetype fallback; allow the fallback
++	 * now and only enter reclaim/compaction if memory is really short.
++	 * The flag stays cleared for the retry loop below.
++	 */
++	if (defrag_mode == DEFRAG_MODE_SOFT &&
++	    (alloc_flags & ALLOC_NOFRAGMENT)) {
++		alloc_flags &= ~ALLOC_NOFRAGMENT;
++		page = get_page_from_freelist(gfp_mask, order, alloc_flags, ac);
++		if (page)
++			goto got_pg;
++	}
++
+ 	reserve_flags = __gfp_pfmemalloc_flags(gfp_mask);
+ 	if (reserve_flags)
+ 		alloc_flags = alloc_flags_cma(gfp_mask) | reserve_flags |
+@@ -6959,7 +6975,7 @@ static const struct ctl_table page_alloc_sysctl_table[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+-		.extra2		= SYSCTL_ONE,
++		.extra2		= SYSCTL_TWO,
+ 	},
+ 	{
+ 		.procname	= "percpu_pagelist_high_fraction",
+-- 
+2.43.0
+

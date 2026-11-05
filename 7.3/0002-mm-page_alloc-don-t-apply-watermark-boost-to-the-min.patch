@@ -1,0 +1,80 @@
+From 4a91fba0dc1ce5e2e9d5f826537ef75af6ade54c Mon Sep 17 00:00:00 2001
+From: "Claude (draft)" <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 16:53:48 +0100
+Subject: [PATCH 2/4] mm/page_alloc: don't apply watermark boost to the min
+ watermark
+
+When a fallback steals a pageblock of another migratetype,
+boost_watermark() raises zone->watermark_boost by a pageblock per event,
+up to watermark_boost_factor (default 150%) of the high watermark.
+wmark_pages() adds the boost to every watermark, including WMARK_MIN,
+so ordinary allocations that are well above the real min watermark
+fail the slow path check and enter direct reclaim (allocstall) until
+kswapd has worked the boost off. Only order-0 __GFP_HIGH allocations
+are currently exempt.
+
+With a raised vm.watermark_scale_factor the high watermark, and hence
+the maximum boost, gets large (several GB on a 32 GB machine), which
+makes this a noticeable source of foreground stalls.
+
+The purpose of the boost is to make kswapd reclaim ahead of future
+fallbacks; rmqueue() already wakes kswapd when the zone is boosted and
+the boosted low/high watermarks keep it running. Ignore the boost for
+all WMARK_MIN checks in zone_watermark_fast().
+
+DRAFT, untested at runtime; compile-tested only on v7.3.1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jpc2uj1P9if4WYVKq5YGZK
+---
+ mm/page_alloc.c | 17 ++++++++++-------
+ mm/vmscan.c     |  5 +++--
+ 2 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 12fac9084..1f9a0a03b 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -3710,13 +3710,16 @@ static inline bool zone_watermark_fast(struct zone *z, unsigned int order,
+ 		return true;
+ 
+ 	/*
+-	 * Ignore watermark boosting for __GFP_HIGH order-0 allocations
+-	 * when checking the min watermark. The min watermark is the
+-	 * point where boosting is ignored so that kswapd is woken up
+-	 * when below the low watermark.
+-	 */
+-	if (unlikely(!order && (alloc_flags & ALLOC_MIN_RESERVE) && z->watermark_boost
+-		&& ((alloc_flags & ALLOC_WMARK_MASK) == WMARK_MIN))) {
++	 * Ignore watermark boosting when checking the min watermark.
++	 * The boost exists to make kswapd reclaim ahead of a fragmentation
++	 * event (it raises low/high, and rmqueue() wakes kswapd when it
++	 * is set). Applying it to the min watermark as well pushes
++	 * allocations that are comfortably above the real min watermark
++	 * into direct reclaim, i.e. it converts a background defrag hint
++	 * into foreground allocation stalls.
++	 */
++	if (unlikely(z->watermark_boost &&
++		     ((alloc_flags & ALLOC_WMARK_MASK) == WMARK_MIN))) {
+ 		mark = z->_watermark[WMARK_MIN];
+ 		return __zone_watermark_ok(z, order, mark, highest_zoneidx,
+ 					alloc_flags, free_pages);
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index f11491ee9..ec7431218 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -7180,8 +7180,9 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
+ 
+ 	/*
+ 	 * Account for the reclaim boost. Note that the zone boost is left in
+-	 * place so that parallel allocations that are near the watermark will
+-	 * stall or direct reclaim until kswapd is finished.
++	 * place so that kswapd keeps being woken while it works; it no longer
++	 * applies to the min watermark, so it does not push parallel
++	 * allocations into direct reclaim (see zone_watermark_fast()).
+ 	 */
+ 	nr_boost_reclaim = 0;
+ 	for_each_managed_zone_pgdat(zone, pgdat, i, highest_zoneidx) {
+-- 
+2.43.0
+

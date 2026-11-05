@@ -1,0 +1,119 @@
+From 0466e7b7bea0f123328bd4368b56676c05a17bf3 Mon Sep 17 00:00:00 2001
+From: "Claude (draft)" <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 16:53:47 +0100
+Subject: [PATCH 1/3] mm/filemap: allocate large page cache folios without
+ direct reclaim/compaction
+
+Page cache readahead and __filemap_get_folio() allocate folios up to
+PMD order with mapping_gfp | __GFP_NORETRY. For orders above
+PAGE_ALLOC_COSTLY_ORDER the allocator slow path then runs direct
+compaction first and, on failure, one round of direct reclaim followed
+by another compaction attempt. __filemap_get_folio() walks orders down
+one by one, so a single write can pay that price for every order from
+PMD order down to order 4.
+
+Large page cache folios are an optimisation. Allocate orders above
+PAGE_ALLOC_COSTLY_ORDER (and above the mapping's min order) without
+__GFP_DIRECT_RECLAIM but with __GFP_KSWAPD_RECLAIM, so kswapd/kcompactd
+are asked to produce blocks in the background, and fall back to smaller
+orders. Readahead now steps down one order on -ENOMEM instead of
+dropping the remainder of the window to the minimum order.
+
+This targets streaming readers (e.g. games streaming assets from disk)
+that otherwise show compact_stall/allocstall spikes on fragmented
+systems even though order-0 memory is plentiful.
+
+DRAFT, untested at runtime; compile-tested only (x86_64 defconfig + THP).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jpc2uj1P9if4WYVKq5YGZK
+---
+ mm/filemap.c   |  7 +++++++
+ mm/internal.h  | 17 +++++++++++++++++
+ mm/readahead.c | 16 +++++++++++++++-
+ 3 files changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/mm/filemap.c b/mm/filemap.c
+index b74bc1e50..511fcf7b6 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -2033,6 +2033,13 @@ struct folio *__filemap_get_folio_mpol(struct address_space *mapping,
+ 			err = -ENOMEM;
+ 			if (order > min_order)
+ 				alloc_gfp |= __GFP_NORETRY | __GFP_NOWARN;
++			/*
++			 * Don't stall in direct reclaim/compaction once per
++			 * order on the way down; only the final fallback
++			 * orders may block.
++			 */
++			alloc_gfp = pagecache_large_folio_gfp(alloc_gfp, order,
++							      min_order);
+ 			folio = filemap_alloc_folio(alloc_gfp, order, policy);
+ 			if (!folio)
+ 				continue;
+diff --git a/mm/internal.h b/mm/internal.h
+index 566cbd2dc..95b1c2756 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -696,6 +696,23 @@ extern unsigned long highest_memmap_pfn;
+  */
+ #define MAX_RECLAIM_RETRIES 16
+ 
++/*
++ * Page cache folios above PAGE_ALLOC_COSTLY_ORDER are an optimisation, not a
++ * requirement (unless the mapping's minimum folio order demands that size).
++ * Allocate them opportunistically: wake kswapd/kcompactd so that large blocks
++ * become available soon, but never make the reading/writing task stall in
++ * direct reclaim or direct compaction for them. Callers fall back to smaller
++ * orders, down to @min_order, which keeps the original gfp mask.
++ */
++static inline gfp_t pagecache_large_folio_gfp(gfp_t gfp, unsigned int order,
++					      unsigned int min_order)
++{
++	if (order > min_order && order > PAGE_ALLOC_COSTLY_ORDER &&
++	    (gfp & __GFP_DIRECT_RECLAIM))
++		gfp = (gfp & ~__GFP_DIRECT_RECLAIM) | __GFP_KSWAPD_RECLAIM;
++	return gfp;
++}
++
+ /*
+  * in mm/vmscan.c:
+  */
+diff --git a/mm/readahead.c b/mm/readahead.c
+index 6e5563290..78ef9727a 100644
+--- a/mm/readahead.c
++++ b/mm/readahead.c
+@@ -460,8 +460,11 @@ static inline int ra_alloc_folio(struct readahead_control *ractl, pgoff_t index,
+ 		pgoff_t mark, unsigned int order, gfp_t gfp)
+ {
+ 	int err;
+-	struct folio *folio = ractl_alloc_folio(ractl, gfp, order);
++	unsigned int min_order = mapping_min_folio_order(ractl->mapping);
++	struct folio *folio;
+ 
++	folio = ractl_alloc_folio(ractl,
++			pagecache_large_folio_gfp(gfp, order, min_order), order);
+ 	if (!folio)
+ 		return -ENOMEM;
+ 	mark = round_down(mark, 1UL << order);
+@@ -533,6 +536,17 @@ void page_cache_ra_order(struct readahead_control *ractl,
+ 		while (order > min_order && index + (1UL << order) - 1 > limit)
+ 			order--;
+ 		err = ra_alloc_folio(ractl, index, mark, order, gfp);
++		/*
++		 * Large folios are allocated opportunistically. If no free
++		 * block of this size is available, step down and keep going
++		 * with smaller folios instead of abandoning large folios for
++		 * the rest of the window. The next window ramps up again.
++		 */
++		if (err == -ENOMEM && order > min_order) {
++			new_order = order - 1;
++			ra->order = new_order;
++			continue;
++		}
+ 		if (err)
+ 			break;
+ 		index += 1UL << order;
+-- 
+2.43.0
+

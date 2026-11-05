@@ -1,0 +1,63 @@
+From cfdd698a1829e660413ed8c5dcd85b4269544b71 Mon Sep 17 00:00:00 2001
+From: "Claude (draft)" <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 16:53:48 +0100
+Subject: [PATCH 3/3] drm/ttm: add low_latency_alloc parameter to bound
+ beneficial-order retries
+
+ttm_pool_alloc_page() allocates the driver's beneficial order (2 MiB
+for amdgpu) with __GFP_RETRY_MAYFAIL, which keeps retrying direct
+reclaim and compaction with escalating priority. On a fragmented
+system this can stall the thread that creates or populates a BO, e.g.
+a game's render or asset-streaming thread on an APU or with GTT
+placements.
+
+Add ttm.low_latency_alloc. When set, the beneficial order keeps the
+__GFP_NORETRY used for other high orders: one bounded round of direct
+reclaim/compaction, then fall back to smaller orders. Default behaviour
+is unchanged.
+
+DRAFT, untested at runtime; compile-tested only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jpc2uj1P9if4WYVKq5YGZK
+---
+ drivers/gpu/drm/ttm/ttm_pool.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/ttm/ttm_pool.c b/drivers/gpu/drm/ttm/ttm_pool.c
+index 1bf37023f..d28a5da93 100644
+--- a/drivers/gpu/drm/ttm/ttm_pool.c
++++ b/drivers/gpu/drm/ttm/ttm_pool.c
+@@ -134,6 +134,11 @@ static unsigned long page_pool_size;
+ MODULE_PARM_DESC(page_pool_size, "Number of pages in the WC/UC/DMA pool per NUMA node");
+ module_param(page_pool_size, ulong, 0644);
+ 
++static bool ttm_pool_low_latency;
++MODULE_PARM_DESC(low_latency_alloc,
++		 "Bound direct reclaim/compaction for the driver's beneficial page order (default: false)");
++module_param_named(low_latency_alloc, ttm_pool_low_latency, bool, 0644);
++
+ static unsigned long pool_node_limit[MAX_NUMNODES];
+ static atomic_long_t allocated_pages[MAX_NUMNODES];
+ 
+@@ -183,7 +188,16 @@ static struct page *ttm_pool_alloc_page(struct ttm_pool *pool, gfp_t gfp_flags,
+ 	if (order && beneficial_order && order != beneficial_order)
+ 		gfp_flags &= ~__GFP_RECLAIM;
+ 
+-	if (beneficial_order && order == beneficial_order) {
++	/*
++	 * By default the beneficial order retries reclaim and compaction
++	 * hard (__GFP_RETRY_MAYFAIL). On a fragmented system that can stall
++	 * the submitting thread (often a game's render or streaming thread)
++	 * for a long time. With ttm.low_latency_alloc=1 it keeps
++	 * __GFP_NORETRY from above: one bounded round of direct
++	 * reclaim/compaction, then fall back to smaller orders.
++	 */
++	if (beneficial_order && order == beneficial_order &&
++	    !READ_ONCE(ttm_pool_low_latency)) {
+ 		gfp_flags &= ~__GFP_NORETRY;
+ 		gfp_flags |= __GFP_RETRY_MAYFAIL;
+ 	}
+-- 
+2.43.0
+
