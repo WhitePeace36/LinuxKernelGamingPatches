@@ -1,0 +1,8 @@
+src/
+pkg/
+*.pkg.tar.*
+linux-*.tar.*
+.lunar-build.cfg
+.lunar-base.config
+.lunar-releases.json*
+lunar-config/last-config-*

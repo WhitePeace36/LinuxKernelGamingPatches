@@ -1,0 +1,75 @@
+#!/usr/bin/env bpftrace
+/*
+ * memstall.bt - measure foreground memory-allocation stalls per process.
+ *
+ * Counts and times what /proc/vmstat only counts:
+ *   - direct reclaim        (allocstall_*, pgscan_direct)
+ *   - direct compaction     (compact_stall)
+ * and prints every single stall longer than STALL_PRINT_US.
+ *
+ * Usage:  sudo bpftrace memstall.bt            (Ctrl-C prints histograms)
+ *         sudo bpftrace memstall.bt > log.txt  (while gaming, then look at log)
+ *
+ * order 0 = 4 KiB, order 9 = 2 MiB (THP / large folio / amdgpu TTM).
+ */
+
+#define STALL_PRINT_US 1000
+
+BEGIN
+{
+	printf("Tracing direct reclaim/compaction stalls > %d us. Ctrl-C to end.\n",
+	       STALL_PRINT_US);
+}
+
+/* ---- direct reclaim ------------------------------------------------ */
+
+tracepoint:vmscan:mm_vmscan_direct_reclaim_begin
+{
+	@rstart[tid] = nsecs;
+	@rorder[tid] = args->order;
+}
+
+tracepoint:vmscan:mm_vmscan_direct_reclaim_end
+/@rstart[tid]/
+{
+	$us = (nsecs - @rstart[tid]) / 1000;
+	@reclaim_us[comm] = hist($us);
+	@reclaim_total_ms[comm] = sum($us / 1000);
+	if ($us > STALL_PRINT_US) {
+		time("%H:%M:%S ");
+		printf("RECLAIM  %-16s pid=%-7d order=%d %6d us reclaimed=%d pages\n",
+		       comm, pid, @rorder[tid], $us, args->nr_reclaimed);
+	}
+	delete(@rstart[tid]);
+	delete(@rorder[tid]);
+}
+
+/* ---- direct compaction --------------------------------------------- */
+
+kprobe:try_to_compact_pages
+/!(curtask->flags & 0x00200000)/	/* skip PF_KTHREAD (kcompactd etc.) */
+{
+	@cstart[tid] = nsecs;
+	@corder[tid] = arg1;
+}
+
+kretprobe:try_to_compact_pages
+/@cstart[tid]/
+{
+	$us = (nsecs - @cstart[tid]) / 1000;
+	@compact_us[comm] = hist($us);
+	@compact_total_ms[comm] = sum($us / 1000);
+	@compact_by_order[@corder[tid]] = count();
+	if ($us > STALL_PRINT_US) {
+		time("%H:%M:%S ");
+		printf("COMPACT  %-16s pid=%-7d order=%d %6d us result=%d\n",
+		       comm, pid, @corder[tid], $us, retval);
+	}
+	delete(@cstart[tid]);
+	delete(@corder[tid]);
+}
+
+END
+{
+	clear(@rstart); clear(@rorder); clear(@cstart); clear(@corder);
+}

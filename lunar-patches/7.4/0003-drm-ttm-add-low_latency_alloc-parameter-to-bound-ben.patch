@@ -1,7 +1,7 @@
 From cfdd698a1829e660413ed8c5dcd85b4269544b71 Mon Sep 17 00:00:00 2001
 From: "Claude (draft)" <noreply@anthropic.com>
 Date: Thu, 5 Nov 2026 16:53:48 +0100
-Subject: [PATCH 3/3] drm/ttm: add low_latency_alloc parameter to bound
+Subject: [PATCH 3/5] drm/ttm: add low_latency_alloc parameter to bound
  beneficial-order retries
 
 ttm_pool_alloc_page() allocates the driver's beneficial order (2 MiB

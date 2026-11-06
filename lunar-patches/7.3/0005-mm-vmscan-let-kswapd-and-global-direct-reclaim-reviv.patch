@@ -1,0 +1,98 @@
+From 6ca2c1d9fd0f566406d29d2ed9a9fb88431b3266 Mon Sep 17 00:00:00 2001
+From: "Claude (draft)" <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 22:40:29 +0100
+Subject: [PATCH] mm/vmscan: let kswapd and global direct reclaim revive a
+ hopeless kswapd
+
+kswapd marks a node hopeless after MAX_RECLAIM_RETRIES runs that
+reclaimed nothing and is then no longer woken. kswapd_try_clear_hopeless()
+only clears that state once the node is balanced, i.e. free memory is
+above the high watermark. That was done so that cgroup reclaim
+(memory.high throttling) cannot keep resetting the counter for a node
+kswapd cannot balance.
+
+On a single-node machine this can leave kswapd off for as long as the
+system stays under pressure. Global direct reclaim frees just enough
+for its own allocation (SWAP_CLUSTER_MAX at a time) and rarely lifts
+free memory to the high watermark, least of all with a raised
+vm.watermark_scale_factor. The PCP freeing path only clears the state
+when another memory node exists. kswapd's own successful runs no longer
+reset the counter either, so zero-progress runs accumulate over time
+instead of having to be consecutive.
+
+Observed on 7.3.1 (tkg build, 32 GiB, zram, watermark_scale_factor=500)
+under a synthetic load with 16 GiB of anonymous memory and streaming
+file reads: node_unreclaimable stayed 1 before and throughout a
+120 s run; pgscan_kswapd 0, pgscan_direct 53M, allocstall 820k.
+
+Keep the balanced requirement for cgroup reclaim, but let progress made
+by kswapd itself or by global direct reclaim clear the hopeless state,
+as before. kswapd then again only gives up after consecutive failures.
+
+DRAFT, untested at runtime; compile-tested only on v7.3.1
+(x86_64 defconfig + THP + MEMCG + LRU_GEN).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jpc2uj1P9if4WYVKq5YGZK
+---
+ mm/vmscan.c | 30 ++++++++++++++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index ec7431218..04d2fa6c4 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -264,6 +264,32 @@ static bool writeback_throttling_sane(struct scan_control *sc)
+ }
+ #endif
+ 
++/*
++ * Reclaim made progress on @pgdat. If that progress came from kswapd itself
++ * or from global direct reclaim, the node is evidently reclaimable: revive a
++ * kswapd that gave up on it. Only cgroup reclaim (memory.high/max, proactive
++ * memory.reclaim) still has to wait until the node is balanced, so that
++ * reclaim confined to one cgroup cannot keep a kswapd running endlessly
++ * against a node it cannot balance (see kswapd_try_clear_hopeless()).
++ *
++ * Requiring the node to be balanced for every reclaimer leaves a single-node
++ * machine without kswapd for as long as it stays under pressure: direct
++ * reclaim frees just enough for its own allocation and rarely lifts free
++ * memory to the high watermark, least of all with a large
++ * watermark_scale_factor. Every allocation then reclaims for itself.
++ */
++static void reclaim_progress_clear_hopeless(pg_data_t *pgdat,
++					    struct scan_control *sc)
++{
++	if (cgroup_reclaim(sc)) {
++		kswapd_try_clear_hopeless(pgdat, sc->order, sc->reclaim_idx);
++		return;
++	}
++	kswapd_clear_hopeless(pgdat, current_is_kswapd() ?
++			      KSWAPD_CLEAR_HOPELESS_KSWAPD :
++			      KSWAPD_CLEAR_HOPELESS_DIRECT);
++}
++
+ static inline bool is_exec_file_folio(const struct folio *folio,
+ 		const vma_flags_t *vma_flags)
+ {
+@@ -5265,7 +5291,7 @@ static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *
+ 	blk_finish_plug(&plug);
+ done:
+ 	if (sc->nr_reclaimed > reclaimed)
+-		kswapd_try_clear_hopeless(pgdat, sc->order, sc->reclaim_idx);
++		reclaim_progress_clear_hopeless(pgdat, sc);
+ }
+ 
+ /******************************************************************************
+@@ -6344,7 +6370,7 @@ static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
+ 	 * successful direct reclaim run will revive a dormant kswapd.
+ 	 */
+ 	if (reclaimable)
+-		kswapd_try_clear_hopeless(pgdat, sc->order, sc->reclaim_idx);
++		reclaim_progress_clear_hopeless(pgdat, sc);
+ 	else if (sc->cache_trim_mode)
+ 		sc->cache_trim_mode_failed = 1;
+ }
+-- 
+2.43.0
+

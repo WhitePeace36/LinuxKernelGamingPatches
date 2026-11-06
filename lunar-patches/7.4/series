@@ -1,0 +1,6 @@
+# toggle variable (customization.cfg)  patch file
+_patch_filemap_large_folios   0001-mm-filemap-allocate-large-page-cache-folios-without-.patch
+_patch_boost_min_wmark        0002-mm-page_alloc-don-t-apply-watermark-boost-to-the-min.patch
+_patch_ttm_low_latency        0003-drm-ttm-add-low_latency_alloc-parameter-to-bound-ben.patch
+_patch_soft_defrag_mode       0004-mm-page_alloc-add-soft-defrag_mode-vm.defrag_mode-2.patch
+_patch_kswapd_hopeless        0005-mm-vmscan-let-kswapd-and-global-direct-reclaim-reviv.patch
