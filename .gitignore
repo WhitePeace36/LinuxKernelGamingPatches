@@ -6,3 +6,4 @@ linux-*.tar.*
 .lunar-base.config
 .lunar-releases.json*
 lunar-config/last-config-*
+tools/memstress

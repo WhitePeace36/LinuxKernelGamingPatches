@@ -8,7 +8,7 @@ third-party changes.
 ## Quick start
 
 ```bash
-git clone <this repo> && cd linux-lunar
+git clone https://github.com/WhitePeace36/linux-lunar.git && cd linux-lunar
 $EDITOR customization.cfg        # or ~/.config/linux-lunar.cfg for your overrides
 ./lunar.sh                       # asks for the kernel version, builds, installs
 ```
@@ -90,7 +90,7 @@ THP, MGLRU, headers package. See the comments in `customization.cfg`.
 
 ## Interrupting and cleaning up
 
-Ctrl+C, closing the terminal or RDP session, or `kill` stops every build
+Ctrl+C, closing the terminal, or `kill` stops every build
 process (makepkg, make, compilers) and removes `src/`, `pkg/` and partial
 downloads (`_cleanup_on_abort`; set it to `"false"` to keep `src/` for
 debugging). A failed build is cleaned up the same way. After a successful build
@@ -107,7 +107,8 @@ build.
 
 ## Measuring
 
-`tools/` holds what was used to test the patches:
+`tools/` holds what was used to test the patches. Build `memstress` first:
+`gcc -O2 -pthread -o tools/memstress tools/memstress.c`
 
 | Tool | Use |
 | --- | --- |
@@ -115,6 +116,11 @@ build.
 | `memdiff.sh` | counter deltas (allocstall, compact_stall, THP, PSI, ...) across a gaming session |
 | `memstress.c` | provoke stalls: fragmented page cache, pinned unmovable pages, THP heap, streaming reads, optional 2:1-compressible anonymous load (`-a GiB`) for zram |
 | `memstall.bt` | bpftrace: every direct reclaim / compaction stall > 1 ms with process and order |
+| `fragwatch.sh` | live fragmentation score, free 2 MiB blocks, kswapd state, compaction migrations and THP success per second |
+
+`memstress -q <sec> -B <MiB> -t 0` tests proactive compaction on its own: after
+the fragmenting setup it stays idle for `<sec>` seconds, then touches one THP
+burst and reports how many 2 MiB chunks got a huge page.
 
 ## Test status
 
@@ -146,5 +152,6 @@ drafts. Patch 0005 matches an approach already under discussion upstream
 linux-mm, July 2026), where it is disputed. Upstream submissions must follow
 `Documentation/process/coding-assistants.rst` and carry a human Signed-off-by.
 
-The kernel patches are GPL-2.0-only, like the kernel. Packaging follows the
-structure of Arch Linux's `linux` PKGBUILD.
+Everything in this repository is licensed under GPL-2.0 (see `LICENSE`), like
+the kernel the patches are for. Packaging follows the structure of Arch Linux's
+`linux` PKGBUILD.

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 label="${1:-run}"
-keys='allocstall_|pgscan_direct|pgscan_direct_throttle|pgscan_kswapd|pgsteal_kswapd|kswapd_low_wmark_hit_quickly|compact_stall|compact_fail|compact_daemon_wake|thp_fault_alloc|thp_fault_fallback|workingset_refault_file|workingset_activate_file|pgmajfault'
+keys='allocstall_|pgscan_direct|pgscan_direct_throttle|pgscan_kswapd|pgsteal_kswapd|kswapd_low_wmark_hit_quickly|compact_stall|compact_fail|compact_daemon_wake|pgmigrate_success|thp_fault_alloc|thp_fault_fallback|workingset_refault_file|workingset_activate_file|pgmajfault|pswpin|pswpout'
 
 snap() {
 	grep -E "^($keys)" /proc/vmstat
